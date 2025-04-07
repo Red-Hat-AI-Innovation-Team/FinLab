@@ -251,7 +251,7 @@ class QWEN_PRM(PRM):
 
     def score(
         self, questions: list[str], outputs: list[list[str]], outputs_is_single_step: bool = False,
-        aggregate_method: str = "model_aggregate", max_token_length=4096, rm_batch_size=4, **kwargs
+        aggregate_method: str = "model_aggregate", max_token_length=4096, rm_batch_size=16, **kwargs
     ) -> list[list[float]]:
         '''
         Score a batch of questions and their step-by-step outputs using PRIME scoring.
@@ -323,6 +323,65 @@ class QWEN_PRM(PRM):
                 all_step_scores.append(step_scores)
             all_scores.append(all_step_scores)
         return all_scores
+
+from transformers import AutoModelForSequenceClassification
+class Skywork_ORM(PRM):
+    def __init__(self, search_config: Config, **model_kwargs):
+        # super().__init__(search_config, **model_kwargs)
+        self.model, self.tokenizer = self.load_model_and_tokenizer(search_config.prm_path)
+
+    def load_model_and_tokenizer(self, model_name: str = None) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
+        import os
+        os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
+        num_gpus = torch.cuda.device_count()
+        print(f"Number of GPUs: {num_gpus}")
+        # if model_name == "Qwen/Qwen2.5-Math-PRM-7B":
+        model = AutoModelForSequenceClassification.from_pretrained(
+                model_name,
+                torch_dtype=torch.bfloat16,
+                device_map=1,
+                # attn_implementation="flash_attention_2",
+                num_labels=1,
+            )
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        return model, tokenizer
+
+    def score(
+        self, questions: list[str], outputs: list[list[str]],
+        aggregate_method: str = "model_aggregate", max_token_length=4096, rm_batch_size=4, **kwargs
+    ) -> list[list[float]]:
+        '''
+        Score a batch of questions and their step-by-step outputs using PRIME scoring.
+        questions: list of questions
+        outputs: list of lists of N responses, where N answers correspond to 1 question.
+        aggregate_method: "product", "lowest", "last", "model_aggregate"
+        '''
+        # TODO: implement QWEN-PRM scoring
+        all_scores = []
+        for question, answers in zip(questions, outputs, strict=True):
+            question_scores = []
+            for ans in answers:
+                messages = [
+                    {"role": "user", "content": question},
+                    {"role": "assistant", "content": ans},
+                ] # 0.88671875
+
+                # Prepare conversation for scoring
+                conversation_tokenized = self.tokenizer.apply_chat_template(
+                    messages, 
+                    tokenize=True, 
+                    return_tensors="pt"
+                ).to(self.model.device)
+                # Get the reward scores
+                with torch.no_grad():
+                    score = self.model(conversation_tokenized).logits[0][0].item()
+                    question_scores.append([score])
+
+            all_scores.append(question_scores)
+
+        return all_scores
+
 
 def get_logprob_of_output_given_question(model, question, answer, proposal_prompt, temperature, vllm_object):
     if proposal_prompt is None:
@@ -475,7 +534,7 @@ class DrSow(PRM):
         return vllm_object, tokenizer
 
     def score(
-        self, questions: list[str], outputs: list[list[str]], rm_batch_size=32, temperature=0.03, aggregate_method=None, **kwargs
+        self, questions: list[str], outputs: list[list[str]], rm_batch_size=64, temperature=0.03, aggregate_method=None, system_prompt=None ,**kwargs
     ) -> list[list[float]]:
         '''
         Score a batch of questions and their step-by-step outputs using PRIME scoring.
@@ -489,7 +548,7 @@ class DrSow(PRM):
                 model="strong",
                 question=question, 
                 answer=answer,
-                proposal_prompt=None,
+                proposal_prompt=system_prompt,
                 temperature=1.0,
                 vllm_object=vllm_object
             )
@@ -497,7 +556,7 @@ class DrSow(PRM):
                 model="weak",
                 question=question, 
                 answer=answer,
-                proposal_prompt=None,
+                proposal_prompt=system_prompt,
                 temperature=1.0,
                 vllm_object=vllm_object
             )
@@ -901,9 +960,12 @@ def load_prm(config: Config) -> PRM:
         return QWEN_ORM(config)
 
     if config.prm_path == "unnormalized_drsow":
-        config.strong_model_name = "Qwen/Qwen2.5-32B-instruct"
-        config.weak_model_name = "Qwen/Qwen2.5-32B"
+        # config.strong_model_name = "Qwen/Qwen2.5-32B-instruct"
+        # config.weak_model_name = "Qwen/Qwen2.5-32B"
         return DrSow(config)
+    
+    if "skywork" in config.prm_path.lower():
+        return Skywork_ORM(config)
 
     if config.prm_path.lower() == "drsow":
         return DrSow(config)
@@ -913,10 +975,12 @@ def load_prm(config: Config) -> PRM:
 if __name__ == "__main__":
     # write a test for the INTERMLM_ORM model
     # config = Config(prm_path="internlm/internlm2-7b-reward")
-    config = Config(prm_path="drsow")
+    # config = Config(prm_path="drsow")
+    config = Config(prm_path="Skywork/Skywork-Reward-Llama-3.1-8B-v0.2")
     prm = load_prm(config)
-    questions = ["Hello! What's your name?"]
-    outputs = [["My name is InternLM2!\n\n A helpful AI assistant.\n\n What can I do for you?", "My name is Qwen trained by Alibaba Cloud team. !\n\n A helpful AI Assistant. How can I help you?"]*8,
+    questions = ["Jane has 12 apples. She gives 4 apples to her friend Mark, then buys 1 more apple, and finally splits all her apples equally among herself and her 2 siblings. How many apples does each person get?"]
+    outputs = [["1. Jane starts with 12 apples and gives 4 to Mark. 12 - 4 = 8. Jane now has 8 apples.\n2. Jane buys 1 more apple. 8 + 1 = 9. Jane now has 9 apples.\n3. Jane splits the 9 apples equally among herself and her 2 siblings (3 people in total). 9 ÷ 3 = 3 apples each. Each person gets 3 apples.",
+                "1. Jane starts with 12 apples and gives 4 to Mark. 12 - 4 = 8. Jane now has 8 apples.\n2. Jane buys 1 more apple. 8 + 1 = 9. Jane now has 9 apples.\n3. Jane splits the 9 apples equally among her 2 siblings (2 people in total). 9 ÷ 2 = 4.5 apples each. Each person gets 4 apples."]*8,
                ]
     # [0.76171875, 0.96484375, 0.99609375]
     # [0.765625]
