@@ -16,7 +16,7 @@ mkdir -p logs
 # Launch Model 1
 echo "Launching Model 1 on GPUs $MODEL1_GPUS..."
 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 CUDA_VISIBLE_DEVICES=$MODEL1_GPUS python -O -u -m vllm.entrypoints.openai.api_server \
-    --port=8303 \
+    --port=8305 \
     --dtype=bfloat16 \
     --model=$MODEL1_PATH \
     --tensor-parallel-size=2 \
@@ -31,7 +31,7 @@ MODEL1_PID=$!
 # Launch Model 2
 echo "Launching Model 2 on GPUs $MODEL2_GPUS..."
 VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 CUDA_VISIBLE_DEVICES=$MODEL2_GPUS python -O -u -m vllm.entrypoints.openai.api_server \
-    --port=8304 \
+    --port=8306 \
     --dtype=bfloat16 \
     --model=$MODEL2_PATH \
     --tensor-parallel-size=2 \
