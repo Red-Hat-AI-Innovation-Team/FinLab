@@ -47,7 +47,7 @@ def load_finance_bench():
         all_examples.append(example)
         
         # Filter for numerical answers
-        if len(answer.split()) < 3 and ("$" in answer[0] or is_number(answer[0])):
+        if len(answer.split()) < 3 and ("$" in answer[0] or is_number(answer[0]) or "%" in answer[0]):
             numerical_examples.append(example)
     
     return all_examples, numerical_examples
@@ -178,8 +178,7 @@ def is_correct(vllm_server, question, extracted_answer, real_answer, tokenizer):
 
 def model_evaluate_answer(vllm_server, question, real_answer, generated_answer, tokenizer):
     """Use the model to evaluate if an answer is correct"""
-    numerical = is_number(real_answer)
-    if numerical:
+    if len(real_answer.split()) < 3 and ("$" in real_answer or is_number(real_answer)):
         input_text = (
             f"Question: {question}\nCorrect Answer: {real_answer}\nProposed Solution: {generated_answer}\n\n"
             "Given the above correct answer and proposed solution, follow the below steps to evaluate the proposed solution:\n"
@@ -191,11 +190,10 @@ def model_evaluate_answer(vllm_server, question, real_answer, generated_answer, 
             f"Question: {question}\nCorrect Answer: {real_answer}\nProposed Solution: {generated_answer}\n\n"
             "Given the above correct answer and proposed solution, follow the below steps to evaluate the proposed solution:\n"
             f"[Step 1] First analyze the Proposed Solution using the correct answer as a reference.\n"
-            f"For factual statements, check if the key facts and conclusions in the Proposed Solution match those in the Correct Answer.\n"
-            f"The Proposed Solution must contain the correct information or equivalent statements that convey the same meaning.\n"
-            f"You should output Correct if the Proposed Solution contains all the essential information from the Correct Answer.\n"
-            f"Output Partial if the Proposed Solution contains some but not all of the correct information or has minor inaccuracies.\n"
-            f"Output Incorrect if the Proposed Solution contains significant factual errors or misses critical information.\n"
+            f"Check if the final conclusion in the Proposed Solution aligns with the correct answer.\n"
+            f"You should output Correct if the Proposed Solution reaches the same conclusion.\n"
+            f"Output Partial if the Proposed Solution contains contradictory information against the correct answer, but still gives a correct conclusion.\n"
+            f"Output Incorrect if the Proposed Solution does not reach the same conclusion.\n"
             f"[Step 2] Output your final judgement in the following format: \\boxed{{Correct}} or \\boxed{{Incorrect}} or \\boxed{{Partial}}.\n"
         )
 
@@ -229,7 +227,7 @@ def model_evaluate_answer(vllm_server, question, real_answer, generated_answer, 
     elif "correct" in extracted_text:
         return 1, response[0]["generated_text"]
     else:
-        raise ValueError("Model evaluation failed: couldn't determine correctness")
+        return 0, response[0]["generated_text"]
 
 
 def particle_filtering(llm, prompt, prm, num_particles=32):
@@ -307,9 +305,6 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
             for i, example in enumerate(test_set):
                 question = unformatted_prompts[i]
                 candidates = [output.text for output in raw_outputs[i].outputs]
-                
-                # drsow_system_prompt = "You are a Finance Analyst with extreme attention to detail. You are given finance documents and data, and you need to answer questions based on the content you have. You must follow the user instruction carefully, including the decimal precision requirement of the answer. You are also an excellent mathematician, and you can perform complex calculations with ease."
-                # drsow_system_prompt = "You are a Finance Analyst with extreme attention to detail. You are given finance documents and data, and you need to answer questions based on the content you have. You must follow the user instruction carefully, including the decimal precision requirement of the answer. You can not make any mistake in the reasoning step! If you make a single mistake, PEOPLE WILL DIE!!!!"
                 # Score all candidates using the reward model
                 if "unnormalized" in args.prm_path:
                     candidate_scores = prm.score([question], [candidates], aggregate_method="unnormalized")[0]
@@ -390,47 +385,6 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
             print(f"Question {i+1}/{len(test_set)}: {'✓' if scoring==1 else '1/2' if scoring==0.5 else '✗'} (Accuracy so far: {correct_count/(i+1):.2%})")
             print(f"Model Answer: {extracted_answer}")
             print(f"Correct Answer: {correct_answer}")
-    # elif sampling_method == "best-of-n":
-    #     # best-of-n sampling
-    #     for i, example in enumerate(tqdm(test_set, desc="Evaluating")):
-    #         question = example['question']
-    #         correct_answer = example['answer']
-    #         documents = example['documents']
-    #         formatted_prompt =format_prompt(example['question'], example['documents'], tokenizer, use_rag_thought_prompt=use_rag_thought_prompt, thinking=thinking)[0]
-        
-    #         sampling_params = SamplingParams(max_tokens=8000, temperature=0.8, top_p=0.95, n=test_time_compute_budget)
-    #         raw_outputs = llm.generate(formatted_prompt, sampling_params)
-    #         responses = [single_res.text for single_res in raw_outputs[0].outputs]
-
-    #         rewards = prm.score([question], [responses])[0] # zero index; because we only have one question
-            
-    #         # Select the best response based on rewards
-    #         best_response_idx = np.argmax(rewards)
-    #         model_response = responses[best_response_idx]
-            
-    #         # Extract answer and judge correctness
-    #         extracted_answer = extract_answer(model_response)
-            
-    #         is_answer_correct, judgement = is_correct(
-    #             judge_vllm_server, question, extracted_answer, correct_answer, judge_tokenizer
-    #         )
-            
-    #         if is_answer_correct:
-    #             correct_count += 1
-                
-    #         results.append({
-    #             'question_id': i,
-    #             'question': question,
-    #             'correct_answer': correct_answer,
-    #             'model_response': model_response,
-    #             'extracted_answer': extracted_answer,
-    #             'is_correct': is_answer_correct,
-    #             'evaluation_judgement': judgement
-    #         })
-            
-    #         print(f"Question {i+1}/{len(test_set)}: {'✓' if is_answer_correct else '✗'}")
-    #         print(f"Model Answer: {extracted_answer}")
-    #         print(f"Correct Answer: {correct_answer}")
             
     else:
         raise ValueError(f"Invalid sampling method: {sampling_method}. Choose either 'greedy', 'pf', or 'best-of-n'.")
@@ -446,6 +400,96 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
         'results': results
     }
 
+
+def evaluate_baseline_with_openai(test_set, openai_client, openai_model_name, judge_vllm_server, use_rag_thought_prompt=False, thinking=None, sampling_method="greedy"):
+    if sampling_method != "greedy":
+        raise ValueError(f"Invalid sampling method: {sampling_method}. Only greedy option is availble for OpenAI models.")
+
+    results = []
+    correct_count = 0
+
+    # Use the same server for judging if not provided
+    if judge_vllm_server is None:
+        raise ValueError("Judge VLLM Server not provided")
+
+    judge_tokenizer = AutoTokenizer.from_pretrained(judge_vllm_server.model_name)
+
+    formatted_prompts = [
+        format_prompt(example['question'], example['documents'], judge_tokenizer, 
+                    use_rag_thought_prompt=use_rag_thought_prompt, thinking=thinking)[1] 
+        for example in test_set
+    ]
+
+    input_messages = [
+        {"role": "user", "content": prompt}
+        for prompt in formatted_prompts
+    ]
+
+    # Process each example individually through OpenAI API
+    model_responses = []
+    extracted_answers = []
+    
+    for i, message in enumerate(input_messages):
+        try:
+            # Call OpenAI API for each question
+            if "o3" in openai_model_name or "o1" in openai_model_name   :
+                response = openai_client.chat.completions.create(
+                    model=openai_model_name,
+                    messages=[message],  # Send one message at a time
+                )
+            else:
+                response = openai_client.chat.completions.create(
+                    model=openai_model_name,
+                    messages=[message],  # Send one message at a time
+                    temperature=0.0,
+                    max_tokens=4000
+                )
+            model_response = response.choices[0].message.content
+            extracted_answer = extract_answer(model_response)
+            
+            model_responses.append(model_response)
+            extracted_answers.append(extracted_answer)
+            
+        except Exception as e:
+            print(f"Error processing question {i+1}: {e}")
+            model_responses.append("Error: API request failed")
+            extracted_answers.append("Error: API request failed")
+
+    # evaluation code
+    for i, example in tqdm(enumerate(test_set), total=len(test_set), desc="Evaluating"):
+        question = example['question']
+        correct_answer = example['answer']
+        extracted_answer = extracted_answers[i]
+        scoring, judgement = is_correct(
+            judge_vllm_server, question, extracted_answer, correct_answer, judge_tokenizer
+        )
+
+        correct_count += scoring
+
+        results.append({
+            'question_id': i,
+            'question': question,
+            'correct_answer': correct_answer,
+            'model_response': model_response,
+            'extracted_answer': extracted_answer,
+            'is_correct': scoring,
+            'evaluation_judgement': judgement
+        })
+
+        print(f"Question {i+1}/{len(test_set)}: {'✓' if scoring==1 else '1/2' if scoring==0.5 else '✗'} (Accuracy so far: {correct_count/(i+1):.2%})")
+        print(f"Model Answer: {extracted_answer}")
+        print(f"Correct Answer: {correct_answer}")
+
+    # Calculate accuracy
+    accuracy = correct_count / len(test_set) if len(test_set) > 0 else 0
+    print(f"Accuracy: {accuracy:.2%}")
+    
+    return {
+        'accuracy': accuracy,
+        'correct_count': correct_count,
+        'total_count': len(test_set),
+        'results': results
+    }
 
 
 if __name__ == "__main__":
@@ -475,7 +519,6 @@ if __name__ == "__main__":
     sampling_method = args.sampling_method
     prm = load_prm(Config(
         prm_path=args.prm_path,
-        # strong_model_name="Qwen/QwQ-32B",
         strong_model_name="Qwen/Qwen2.5-32B-instruct",
         weak_model_name="Qwen/Qwen2.5-32B",
         strong_port = 8305,
@@ -483,20 +526,36 @@ if __name__ == "__main__":
     ))
 
     prm.score(["What is the revenue of NVIDIA in 2024 Q4?"], [["$39,331 million"]])
-    # print(prm.model.strong_port)
-    # print(prm.model.weak_port)
-    # print(prm.model.strong_model_name)
-    # print(prm.model.weak_model_name)
-    # test1 = prm.model.fetch_logprobs("strong", [[{"role": "user", "content": "What is the revenue of NVIDIA in 2024 Q4?"}, {"role": "assistant", "content": "$39,331 million and more!!!   !!!"}]], 1.0)
-    # test2 = prm.model.fetch_logprobs("weak", [[{"role": "user", "content": "What is the revenue of NVIDIA in 2024 Q4?"}, {"role": "assistant", "content": "$39,331 million and more!!!   !!!"}]], 1.0)
-    llm = LLM(
-        model=model_name,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        swap_space=16,
-        # enable_prefix_caching=False,
-        # device=args.device,
-        # tensor_parallel_size=1,
-    )
+
+
+    # Check if we're using OpenAI API
+    if model_name.startswith("openai/"):
+        from openai import OpenAI
+        import os
+        
+        # Extract the actual model name from the prefix
+        openai_model_name = model_name.replace("openai/", "")
+        
+        # Check if OpenAI API key is set
+        if "OPENAI_API_KEY" not in os.environ:
+            raise ValueError("OPENAI_API_KEY environment variable must be set to use OpenAI models")
+        
+        # Create OpenAI client
+        openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        
+        # Set llm to None as we'll use the OpenAI client directly
+        llm = None
+        
+        print(f"Using OpenAI API with model: {openai_model_name}")
+    else:
+        # For non-OpenAI models, continue with VLLM setup
+        openai_client = None
+        openai_model_name = None
+        llm = LLM(
+            model=model_name,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            swap_space=16,
+        )
 
 
     os.environ["TOKENIZERS_PARALLELISM"] = "False"
@@ -521,9 +580,12 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Invalid benchmark name: {args.bench_name}. Choose either 'finbench' or 'nvidia-bench'.")
 
-    eval_result = evaluate_on_benchmark(testset, model_name, 
+    if not model_name.startswith("openai/"):
+        eval_result = evaluate_on_benchmark(testset, model_name, 
                                      llm=llm, use_rag_thought_prompt=args.use_rag_thought_prompt, prm=prm,
                                      judge_vllm_server=judge_vllm_server, test_time_compute_budget=test_time_compute_budget, thinking=thinking, sampling_method=sampling_method, args=args)
+    else:
+        eval_result = evaluate_baseline_with_openai(testset, openai_client, openai_model_name, judge_vllm_server, use_rag_thought_prompt=args.use_rag_thought_prompt, thinking=thinking, sampling_method=sampling_method)
 
     # save the eval result to a json file
     with open(output_file, "w") as f:
