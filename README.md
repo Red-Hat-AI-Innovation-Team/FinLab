@@ -5,6 +5,8 @@ FinLab provides the code to run inference time scaling on FinanceBench with auto
 
 It also includes the official implementation of Dr. SoW reward function, which shows good the best inference time scaling performance on the Benchmark.
 
+![inference_scaling_Llama-3 1-8B-Instruct](https://github.com/user-attachments/assets/546658cf-2cb0-451c-84ee-28c5cb27caa3)
+
 ## Usage
 
 ### Inference Time Scaling with Dr.Sow Reward
@@ -25,7 +27,7 @@ It also includes the official implementation of Dr. SoW reward function, which s
      --sampling-method best-of-n \
      --test-time-compute-budget 128
    ```
-![inference_scaling_Llama-3 1-8B-Instruct](https://github.com/user-attachments/assets/546658cf-2cb0-451c-84ee-28c5cb27caa3)
+
 
 ### Inference Time Scaling with Classifier Rewards
 
