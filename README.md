@@ -25,6 +25,7 @@ It also includes the official implementation of Dr. SoW reward function, which s
      --sampling-method best-of-n \
      --test-time-compute-budget 128
    ```
+![inference_scaling_Llama-3 1-8B-Instruct](https://github.com/user-attachments/assets/546658cf-2cb0-451c-84ee-28c5cb27caa3)
 
 ### Inference Time Scaling with Classifier Rewards
 
