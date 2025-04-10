@@ -1,7 +1,7 @@
 
 ## Overview
 
-FinLab provides the code to run inference time scaling on FinanceBench with automatic evaluation.
+FinLab provides the code to run **inference time scaling** on FinanceBench with **automatic evaluation**.
 
 It also includes the official implementation of Dr. SoW reward function, which shows good the best inference time scaling performance on the Benchmark.
 
@@ -19,6 +19,8 @@ It also includes the official implementation of Dr. SoW reward function, which s
    ```
 
 2. **Launch inference time scaling:**
+   
+Below script will run ITS plus automatic evaluation.
 
    ```bash
    python main.py \
