@@ -1,13 +1,21 @@
 
 ## Overview
 
-FinLab provides the code to run **inference time scaling** on FinanceBench with **automatic evaluation**.
+FinLab is a modular framework for running **Inference-Time Scaling (ITS)** on the FinanceBench benchmark — with **automated evaluation out of the box**.
 
-It also includes the official implementation of Dr. SoW reward function, which shows good the best inference time scaling performance on the Benchmark.
+This repository also contains the **official implementation of the Dr. SoW** reward method, a **state-of-the-art generalist reward modeling** that achieves the strongest ITS performance on FinanceBench.
+
+
 
 ![inference_scaling_Llama-3 1-8B-Instruct](https://github.com/user-attachments/assets/546658cf-2cb0-451c-84ee-28c5cb27caa3)
 
 ## Usage
+
+### Installation
+   ```bash
+   pip install -e .
+   ```
+
 
 ### Inference Time Scaling with Dr.Sow Reward
 
@@ -32,6 +40,8 @@ Below script will run ITS plus automatic evaluation.
 
 
 ### Inference Time Scaling with Classifier Rewards
+
+Below script will run ITS plus automatic evaluation.
 
 1. **Initialize the judge server:**
 
