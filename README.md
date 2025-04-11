@@ -5,7 +5,7 @@ FinLab is a modular framework for running **Inference-Time Scaling (ITS)** on th
 
 This repository also contains the **official implementation of the Dr. SoW** reward method, a **state-of-the-art generalist reward modeling** that achieves the strongest ITS performance on FinanceBench.
 
-
+Below plot uses a simple Inference-Time-Scaling method: **Best-of-N**, and find **Dr. SoW** to give consistently higher performance across compute budgets. 
 
 ![inference_scaling_Llama-3 1-8B-Instruct](https://github.com/user-attachments/assets/546658cf-2cb0-451c-84ee-28c5cb27caa3)
 
