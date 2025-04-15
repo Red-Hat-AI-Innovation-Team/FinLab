@@ -340,7 +340,7 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
             futures = []
             for i, example in enumerate(tqdm(test_set, desc="Evaluating")):
-                output = executor.submit(is_correct, None, example['question'], extract_answer(responses[i]), example['answer'], judge_openai_client, judge_openai_client)
+                output = executor.submit(is_correct, judge_model_name, example['question'], extract_answer(responses[i]), example['answer'], judge_openai_client, judge_openai_client)
                 futures.append(output)
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
                 score, judge_text = future.result()
@@ -487,10 +487,7 @@ if __name__ == "__main__":
             max_model_len=8192
         )
     
-    if "gpt" in args.judge_model_name.lower():
-        judge_openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    else:
-        judge_openai_client = None
+    judge_openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
     os.environ["TOKENIZERS_PARALLELISM"] = "False"
 
