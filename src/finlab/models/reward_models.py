@@ -235,7 +235,7 @@ class QWEN_PRM(PRM):
         # if model_name == "Qwen/Qwen2.5-Math-PRM-7B":
         model = LLM(model=model_name, 
                     task="reward",
-                    device=1,
+                    device=num_gpus-1, # use the last gpu
                     gpu_memory_utilization=0.8,
                     tensor_parallel_size=1,
                     )
@@ -339,7 +339,7 @@ class Skywork_ORM(PRM):
         model = AutoModelForSequenceClassification.from_pretrained(
                 model_name,
                 torch_dtype=torch.bfloat16,
-                device_map=1,
+                device_map=num_gpus-1, # use the last gpu
                 # attn_implementation="flash_attention_2",
                 num_labels=1,
             )

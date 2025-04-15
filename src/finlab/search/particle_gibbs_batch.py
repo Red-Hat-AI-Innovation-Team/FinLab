@@ -12,7 +12,7 @@ os.environ["HF_TOKEN"] = "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"
 from glob import glob
 
 from datasets import load_dataset
-from finlab.utils.math import *
+# from finlab.utils.math import *
 from finlab.utils.grader import *
 
 from finlab.utils.qwen_math_parser import *

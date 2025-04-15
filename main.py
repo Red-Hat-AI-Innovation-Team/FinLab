@@ -11,6 +11,11 @@ import argparse
 import logging
 import json
 import uuid
+import concurrent.futures
+import concurrent
+from openai import OpenAI
+import torch
+
 
 # Disable logging from the sal.search module
 logging.getLogger('sal.search').setLevel(logging.ERROR)
@@ -160,12 +165,12 @@ def extract_answer(text):
     return "ERROR"
 
 
-def is_correct(vllm_server, question, extracted_answer, real_answer, tokenizer):
+def is_correct(judge_model_name, question, extracted_answer, real_answer, tokenizer, openai_client=None):
     """Check if the extracted answer is correct using model evaluation"""
     for attempt in range(3):
         try:
             model_evaluation, text = model_evaluate_answer(
-                vllm_server, question, real_answer, extracted_answer, tokenizer
+                judge_model_name, question, real_answer, extracted_answer, tokenizer, openai_client
             )
             break
         except Exception as e:
@@ -176,7 +181,7 @@ def is_correct(vllm_server, question, extracted_answer, real_answer, tokenizer):
     return model_evaluation, text
 
 
-def model_evaluate_answer(vllm_server, question, real_answer, generated_answer, tokenizer):
+def model_evaluate_answer(judge_model_name, question, real_answer, generated_answer, tokenizer, openai_client=None):
     """Use the model to evaluate if an answer is correct"""
     if len(real_answer.split()) < 3 and ("$" in real_answer or is_number(real_answer)):
         input_text = (
@@ -197,38 +202,25 @@ def model_evaluate_answer(vllm_server, question, real_answer, generated_answer, 
             f"[Step 2] Output your final judgement in the following format: \\boxed{{Correct}} or \\boxed{{Incorrect}} or \\boxed{{Partial}}.\n"
         )
 
-    prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": input_text}],
-        tokenize=False,
-        add_generation_prompt=True
-    )
 
-    response = vllm_server.make_vllm_request(
-        [prompt],
-        port=vllm_server.port,
-        model_name=vllm_server.model_name,
-        decoding_method="greedy",
-        max_new_tokens=20000,
+
+    response = openai_client.chat.completions.create(
+        model=judge_model_name,
+        messages=[{"role": "user", "content": input_text}],  # Send one message at a time
         temperature=0.0,
-        top_k=50,
-        top_p=0.85,
-        stop_sequences=None,
-        num_workers=40,
-        logprobs=0,
-        echo=False,
-        repetition_penalty=1.0
+        max_tokens=4000
     )
-    
-    extracted_text = extract_answer(response[0]["generated_text"]).lower()
-    if "partial" in extracted_text:
-        return 0.5, response[0]["generated_text"]
-    elif "incorrect" in extracted_text:
-        return 0, response[0]["generated_text"]
-    elif "correct" in extracted_text:
-        return 1, response[0]["generated_text"]
-    else:
-        return 0, response[0]["generated_text"]
+    response = response.choices[0].message.content
+    extracted_text = extract_answer(response).lower()
 
+    if "partial" in extracted_text:
+        return 0.5, response
+    elif "incorrect" in extracted_text:
+        return 0, response
+    elif "correct" in extracted_text:
+        return 1, response
+    else:
+        return 0, response
 
 def particle_filtering(llm, prompt, prm, num_particles=32):
     """Run particle filtering to get the best response"""
@@ -243,8 +235,8 @@ def particle_filtering(llm, prompt, prm, num_particles=32):
 
 
 def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
-                       use_rag_thought_prompt=False, judge_vllm_server=None, 
-                       test_time_compute_budget=32, thinking=None, sampling_method="greedy", args=None):
+                       use_rag_thought_prompt=False, judge_model_name="gpt4-o", 
+                       test_time_compute_budget=32, thinking=None, sampling_method="greedy", args=None, judge_openai_client=None, temperature=0.1):
     """
     Evaluates the model on a development set of financial questions.
     
@@ -256,7 +248,7 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
         llm: The language model to use for evaluation
         prm: Preference reward model for particle filtering
         use_rag_thought_prompt: Whether to use RAG thought prompt
-        judge_vllm_server: VLLM server for the judge model
+        judge_model_name: Name of the judge model
         num_particles: Number of particles for particle filtering
         thinking: Detailed thinking to include in the prompt
         
@@ -266,17 +258,13 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
     results = []
     correct_count = 0
     
-    # Use the same server for judging if not provided
-    if judge_vllm_server is None:
-        raise ValueError("Judge VLLM Server not provided")
     tokenizer = llm.get_tokenizer()
     if "phi-4-mini-instruct" in model_name.lower():
         tokenizer.eos_token = "<|end|>"
         tokenizer.eos_token_id = tokenizer.encode("<|end|>")[0]
 
-    judge_tokenizer = AutoTokenizer.from_pretrained(judge_vllm_server.model_name)
-
-    if sampling_method == "greedy" or sampling_method == "best-of-n":
+    judge_tokenizer = None
+    if sampling_method == "greedy" or sampling_method == "best-of-n" or sampling_method == "majority-vote":
 
         formatted_prompts = [
             format_prompt(example['question'], example['documents'], tokenizer, 
@@ -288,23 +276,46 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
                          use_rag_thought_prompt=use_rag_thought_prompt, thinking=thinking)[1] 
             for example in test_set
         ]
+        all_scores = []
         if sampling_method == "greedy":
             # Greedy decoding approach
             print("Using greedy decoding...")
             sampling_params = SamplingParams(max_tokens=4000, temperature=0.0, top_p=0.95)
             raw_outputs = llm.generate(formatted_prompts, sampling_params)
             responses = [res.outputs[0].text for res in raw_outputs]
+            all_responses = responses
+        elif sampling_method == "majority-vote":
+            # best-of-n decoding approach
+            print(f"Using majority-vote-of-{test_time_compute_budget} decoding...")
+            sampling_params = SamplingParams(max_tokens=4000, temperature=temperature, top_p=0.95, n=test_time_compute_budget)
+            raw_outputs = llm.generate(formatted_prompts, sampling_params)
+            all_responses = [ [candidate.text for candidate in raw_output.outputs] for raw_output in raw_outputs]
+            # Process all responses for each question using the reward model
+            responses = []
+            for i, example in enumerate(test_set):
+                question = unformatted_prompts[i]
+                candidates = all_responses[i]
+                # extract the short response;
+                extracted_answers = [extract_answer(candidate) for candidate in candidates]
+                # majority vote
+                # Count occurrences of each answer and select the most common one
+                most_common_answer = max(set(extracted_answers), key=extracted_answers.count)
+                responses.append(most_common_answer)
+                print(f"Question {i+1}: Selected candidate with majority vote")
+            
+
         else:
             # best-of-n decoding approach
             print(f"Using best-of-{test_time_compute_budget} decoding...")
-            sampling_params = SamplingParams(max_tokens=4000, temperature=0.8, top_p=0.95, n=test_time_compute_budget)
+            sampling_params = SamplingParams(max_tokens=4000, temperature=temperature, top_p=0.95, n=test_time_compute_budget)
             raw_outputs = llm.generate(formatted_prompts, sampling_params)
+            all_responses = [ [candidate.text for candidate in raw_output.outputs] for raw_output in raw_outputs]
 
             # Process all responses for each question using the reward model
             responses = []
             for i, example in enumerate(test_set):
                 question = unformatted_prompts[i]
-                candidates = [output.text for output in raw_outputs[i].outputs]
+                candidates = all_responses[i]
                 # Score all candidates using the reward model
                 if "unnormalized" in args.prm_path:
                     candidate_scores = prm.score([question], [candidates], aggregate_method="unnormalized")[0]
@@ -314,7 +325,7 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
                 
                 # Flatten the scores bc they're nested
                 candidate_scores = [score[-1] for score in candidate_scores]
-                
+                all_scores.append(candidate_scores)
                 # Find the candidate with the highest score
                 best_candidate_idx = np.argmax(candidate_scores)
                 best_candidate = candidates[best_candidate_idx]
@@ -324,31 +335,36 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
                 
                 print(f"Question {i+1}: Selected candidate {best_candidate_idx+1}/{len(candidates)} with score {candidate_scores[best_candidate_idx]:.4f}")
 
-        for i, example in enumerate(tqdm(test_set, desc="Evaluating")):
-            question = example['question']
-            correct_answer = example['answer']
-            extracted_answer = extract_answer(responses[i])
-            
-            scoring, judgement = is_correct(
-                judge_vllm_server, question, extracted_answer, correct_answer, judge_tokenizer
-            )
-            
 
-            correct_count += scoring
+        gpt4o_judge, gpt4o_judge_text = [], []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            futures = []
+            for i, example in enumerate(tqdm(test_set, desc="Evaluating")):
+                output = executor.submit(is_correct, None, example['question'], extract_answer(responses[i]), example['answer'], judge_openai_client, judge_openai_client)
+                futures.append(output)
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
+                score, judge_text = future.result()
+                gpt4o_judge.append(score)
+                gpt4o_judge_text.append(judge_text)
+            
+        for i, example in enumerate(tqdm(test_set, desc="Evaluating")):
+            correct_count += gpt4o_judge[i]
                 
             results.append({
                 'question_id': i,
-                'question': question,
-                'correct_answer': correct_answer,
+                'question': example['question'],
+                'correct_answer': example['answer'],
                 'model_response': responses[i],
-                'extracted_answer': extracted_answer,
-                'is_correct': scoring,
-                'evaluation_judgement': judgement
+                "all_responses": all_responses[i],
+                "all_responses_scores": all_scores[i] if len(all_scores) > 0 else None,
+                'extracted_answer': extract_answer(responses[i]),
+                'is_correct': gpt4o_judge[i],
+                'evaluation_judgement': gpt4o_judge_text[i]
             })
             
-            print(f"Question {i+1}/{len(test_set)}: {'✓' if scoring==1 else '1/2' if scoring==0.5 else '✗'} (Accuracy so far: {correct_count/(i+1):.2%})")
-            print(f"Model Answer: {extracted_answer}")
-            print(f"Correct Answer: {correct_answer}")
+            print(f"Question {i+1}/{len(test_set)}: {'✓' if gpt4o_judge[i]==1 else '1/2' if gpt4o_judge[i]==0.5 else '✗'} (Accuracy so far: {correct_count/(i+1):.2%})")
+            print(f"Model Answer: {extract_answer(responses[i])}")
+            print(f"Correct Answer: {example['answer']}")
 
     elif sampling_method == "pf":
         # Particle filtering approach
@@ -367,7 +383,7 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
             extracted_answer = extract_answer(model_response)
             
             scoring, judgement = is_correct(
-                judge_vllm_server, question, extracted_answer, correct_answer, judge_tokenizer
+                judge_model_name, question, extracted_answer, correct_answer, judge_tokenizer, judge_openai_client
             )
 
             correct_count += scoring
@@ -387,7 +403,7 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
             print(f"Correct Answer: {correct_answer}")
             
     else:
-        raise ValueError(f"Invalid sampling method: {sampling_method}. Choose either 'greedy', 'pf', or 'best-of-n'.")
+        raise ValueError(f"Invalid sampling method: {sampling_method}. Choose either 'greedy', 'pf', or 'best-of-n', or 'majority-vote'.")
 
     # Calculate accuracy
     accuracy = correct_count / len(test_set) if len(test_set) > 0 else 0
@@ -400,96 +416,6 @@ def evaluate_on_benchmark(test_set, model_name, llm=None, prm=None,
         'results': results
     }
 
-
-def evaluate_baseline_with_openai(test_set, openai_client, openai_model_name, judge_vllm_server, use_rag_thought_prompt=False, thinking=None, sampling_method="greedy"):
-    if sampling_method != "greedy":
-        raise ValueError(f"Invalid sampling method: {sampling_method}. Only greedy option is availble for OpenAI models.")
-
-    results = []
-    correct_count = 0
-
-    # Use the same server for judging if not provided
-    if judge_vllm_server is None:
-        raise ValueError("Judge VLLM Server not provided")
-
-    judge_tokenizer = AutoTokenizer.from_pretrained(judge_vllm_server.model_name)
-
-    formatted_prompts = [
-        format_prompt(example['question'], example['documents'], judge_tokenizer, 
-                    use_rag_thought_prompt=use_rag_thought_prompt, thinking=thinking)[1] 
-        for example in test_set
-    ]
-
-    input_messages = [
-        {"role": "user", "content": prompt}
-        for prompt in formatted_prompts
-    ]
-
-    # Process each example individually through OpenAI API
-    model_responses = []
-    extracted_answers = []
-    
-    for i, message in enumerate(input_messages):
-        try:
-            # Call OpenAI API for each question
-            if "o3" in openai_model_name or "o1" in openai_model_name   :
-                response = openai_client.chat.completions.create(
-                    model=openai_model_name,
-                    messages=[message],  # Send one message at a time
-                )
-            else:
-                response = openai_client.chat.completions.create(
-                    model=openai_model_name,
-                    messages=[message],  # Send one message at a time
-                    temperature=0.0,
-                    max_tokens=4000
-                )
-            model_response = response.choices[0].message.content
-            extracted_answer = extract_answer(model_response)
-            
-            model_responses.append(model_response)
-            extracted_answers.append(extracted_answer)
-            
-        except Exception as e:
-            print(f"Error processing question {i+1}: {e}")
-            model_responses.append("Error: API request failed")
-            extracted_answers.append("Error: API request failed")
-
-    # evaluation code
-    for i, example in tqdm(enumerate(test_set), total=len(test_set), desc="Evaluating"):
-        question = example['question']
-        correct_answer = example['answer']
-        extracted_answer = extracted_answers[i]
-        scoring, judgement = is_correct(
-            judge_vllm_server, question, extracted_answer, correct_answer, judge_tokenizer
-        )
-
-        correct_count += scoring
-
-        results.append({
-            'question_id': i,
-            'question': question,
-            'correct_answer': correct_answer,
-            'model_response': model_response,
-            'extracted_answer': extracted_answer,
-            'is_correct': scoring,
-            'evaluation_judgement': judgement
-        })
-
-        print(f"Question {i+1}/{len(test_set)}: {'✓' if scoring==1 else '1/2' if scoring==0.5 else '✗'} (Accuracy so far: {correct_count/(i+1):.2%})")
-        print(f"Model Answer: {extracted_answer}")
-        print(f"Correct Answer: {correct_answer}")
-
-    # Calculate accuracy
-    accuracy = correct_count / len(test_set) if len(test_set) > 0 else 0
-    print(f"Accuracy: {accuracy:.2%}")
-    
-    return {
-        'accuracy': accuracy,
-        'correct_count': correct_count,
-        'total_count': len(test_set),
-        'results': results
-    }
 
 
 if __name__ == "__main__":
@@ -499,16 +425,15 @@ if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser(description='Evaluate models on financial benchmarks')
     parser.add_argument('--model-name', type=str, default="microsoft/phi-4", help='Model name to evaluate')
-    parser.add_argument('--judge-model-name', type=str, default="microsoft/phi-4", help='Model name for judging')
-    parser.add_argument('--judge-port', type=int, default=8000, help='Port for the judge VLLM server')
-    parser.add_argument('--gpu-memory-utilization', type=float, default=0.8, help='GPU memory utilization')
+    parser.add_argument('--judge-model-name', type=str, default="gpt-4o", help='Model name for judging; only support openai models for now.')
+    parser.add_argument('--gpu-memory-utilization', type=float, default=0.9, help='GPU memory utilization')
     parser.add_argument('--device', type=int, default=0, help='GPU device ID')
-    parser.add_argument('--prm-path', type=str, default="drsow", help='PRM path; prm used for particle filtering; or best-of-n')
+    parser.add_argument('--prm-path', type=str, default="drsow", help='PRM path; prm used for particle filtering; or best-of-n or majority-vote')
     parser.add_argument('--output-dir', type=str, default="finbench_eval_full", help='Output directory')
     parser.add_argument('--use-rag-thought-prompt', type=bool, default=True, help='Whether to use RAG thought prompt')
     parser.add_argument('--sampling-method', type=str, default="greedy", help='Sampling method; greedy or pf or best-of-n')
     parser.add_argument('--test-time-compute-budget', type=int, default=32, help='Test time compute budget for particle filtering or best-of-n')
-    parser.add_argument('--thinking', type=str, default=None, help='Detailed thinking')
+    parser.add_argument('--thinking', type=str, default=None, help='Detailed thinking; use "on" or "off" for nemotron models')
     parser.add_argument('--bench-name', type=str, default="finbench", help='Benchmark to evaluate on: finbench or nvidia-bench')
     args = parser.parse_args()
 
@@ -549,18 +474,25 @@ if __name__ == "__main__":
         print(f"Using OpenAI API with model: {openai_model_name}")
     else:
         # For non-OpenAI models, continue with VLLM setup
+
+        # get number of gpus available
+        num_gpus = torch.cuda.device_count()
+        tensor_parallel_size = min(num_gpus, 2)
         openai_client = None
         openai_model_name = None
         llm = LLM(
             model=model_name,
             gpu_memory_utilization=args.gpu_memory_utilization,
-            swap_space=16,
+            tensor_parallel_size=tensor_parallel_size,
+            max_model_len=8192
         )
-
+    
+    if "gpt" in args.judge_model_name.lower():
+        judge_openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    else:
+        judge_openai_client = None
 
     os.environ["TOKENIZERS_PARALLELISM"] = "False"
-
-    judge_vllm_server = VLLM(model_name=args.judge_model_name, port=args.judge_port)
 
     # add a uuid to the output file name
     import uuid
@@ -571,7 +503,7 @@ if __name__ == "__main__":
     if thinking is not None:
         mode += f"_thinking_{thinking}"
 
-    output_file = os.path.join(args.output_dir,args.bench_name, f"{model_name.replace('/', '_')}_{mode}_prm_{args.prm_path.replace('/', '_')}_budget_{test_time_compute_budget}_numerical_eval_{uuid}.jsonl")
+    output_file = os.path.join(args.output_dir,args.bench_name, f"{model_name.replace('/', '_')}_{mode}_prm_{args.prm_path.replace('/', '_')}_budget_{test_time_compute_budget}_{uuid}.jsonl")
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     if args.bench_name == "finbench":
         testset = load_finance_bench()[0]
@@ -580,12 +512,9 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Invalid benchmark name: {args.bench_name}. Choose either 'finbench' or 'nvidia-bench'.")
 
-    if not model_name.startswith("openai/"):
-        eval_result = evaluate_on_benchmark(testset, model_name, 
-                                     llm=llm, use_rag_thought_prompt=args.use_rag_thought_prompt, prm=prm,
-                                     judge_vllm_server=judge_vllm_server, test_time_compute_budget=test_time_compute_budget, thinking=thinking, sampling_method=sampling_method, args=args)
-    else:
-        eval_result = evaluate_baseline_with_openai(testset, openai_client, openai_model_name, judge_vllm_server, use_rag_thought_prompt=args.use_rag_thought_prompt, thinking=thinking, sampling_method=sampling_method)
+    eval_result = evaluate_on_benchmark(testset, model_name, 
+                                    llm=llm, use_rag_thought_prompt=args.use_rag_thought_prompt, prm=prm,
+                                    judge_model_name=args.judge_model_name, test_time_compute_budget=test_time_compute_budget, thinking=thinking, sampling_method=sampling_method, args=args, judge_openai_client=judge_openai_client)
 
     # save the eval result to a json file
     with open(output_file, "w") as f:
